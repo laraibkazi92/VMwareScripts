@@ -1,5 +1,9 @@
 Un-official scripts for various workflows for various VMware products
 
+```diff
+- NOTE: These scripts are Un-official and are not approved or supported by VMware Engineering.
++ The only "Approved" and "Supported" scripts are the ones that are available in Public KBs
+```
 
 
 ## nsxtVmcaCert.py
