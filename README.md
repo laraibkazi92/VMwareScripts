@@ -19,3 +19,11 @@ Published in KB: https://kb.vmware.com/kb/89921
 Script to export ALL Global Permissions from a vCenter Server Appliance to an object file, and then re-import them as needed.
 
 Needs to be run on a source/target vCenter.
+
+============================================================= 
+
+## fix_known_hosts.sh
+Script to find any and all entries associated with a particular FQDN and IP and remove all entries associated with those from all known_hosts files in the SDDC Manager
+
+Once they are deleted, we add newly computed keyscans values to the known_hosts files
+
