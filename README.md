@@ -27,3 +27,7 @@ Script to find any and all entries associated with a particular FQDN and IP and 
 
 Once they are deleted, we add newly computed keyscans values to the known_hosts files
 
+============================================================= 
+
+## sddcManagerVncaCert.py
+Script to regenerate the SDDC Manager Certificate with a new VMCA (From MGMT vCenter) signed Certificate
