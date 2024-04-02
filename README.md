@@ -29,5 +29,5 @@ Once they are deleted, we add newly computed keyscans values to the known_hosts 
 
 ============================================================= 
 
-## sddcManagerVncaCert.py
+## sddcManagerVmcaCert.py
 Script to regenerate the SDDC Manager Certificate with a new VMCA (From MGMT vCenter) signed Certificate
