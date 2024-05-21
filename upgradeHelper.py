@@ -1,4 +1,29 @@
 #!/usr/bin/env python
+"""
+__author__ =  ["Laraib Kazi"]
+__credits__ = ["Tyler FitzGerald", "Sydney Young"]
+__license__ = "SPDX-License-Identifier: MIT"
+__status__ = "Beta"
+__copyright__ = "Copyright (C) 2024 Broadcom Inc."
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in the
+Software without restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the
+Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+"""
+
 import os
 import sys
 # Check if root user:
@@ -14,12 +39,13 @@ import logging
 import urllib3
 import getpass
 import stat
+import socket
 from pathlib import Path
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __author__ = 'Laraib Kazi'
-__version__ = '3.0.1'
+__version__ = '3.1.5'
 
 logdir = '/var/log/vmware/vcf/'
 logFile = logdir+'upgradeHelper.log'
@@ -33,10 +59,10 @@ Pre-requistes:
 - SDDC Manager has to be upgraded to the target VCF BoM.
 - The script has to be run as root.
 
-For any questions and concerns, please reach out to me directly at lkazi@vmware.com
+For any questions and concerns, please reach out to me directly at laraib.kazi@broadcom.com
 
-This script is only intended for VCF 4.x and 5.x
-Currently it will not run on VCF 3.x
+This script is only intended for SDDC Manager 4.x and 5.x
+It will not run on SDDC Manager 3.x
 '''
 CYELLOW = '\033[93m'
 CGREEN = '\033[92m'
@@ -107,6 +133,7 @@ def getAllBundles(token):
     logger.info(f'Attempting {api_type} API Call with URL {api_url}')
     response = requests.request(api_type, api_url, headers=headers, verify=False)
     if response.status_code == 200:
+        logger.debug(f'Bundles: {response.json()["elements"]}')
         return response.json()['elements']
     else:
         # print(f"  [ {CRED}\u2717{CEND} ] {component} \tBundle: {bundleId} | Download Status: {CRED}Bundle Not Found{CEND}")
@@ -182,10 +209,10 @@ def getTargetVersions(manifest,sddcVersion):
                     vcVersion=bomEntry['version']
                 if bomEntry['name'] == "HOST":
                     esxVersion=bomEntry['version']          
-            currentManifestInfo = {"vc":vcVersion,"esx":esxVersion,"nsx":nsxtVersion}
-            logger.debug(f'Manifest Info for Current VCF Version: {currentManifestInfo}')
+            targetManifestInfo = {"vc":vcVersion,"esx":esxVersion,"nsx":nsxtVersion}
+            logger.debug(f'Manifest Info for Target BoM Version: {targetManifestInfo}')
             break
-    return currentManifestInfo
+    return targetManifestInfo
 
 def service_status():
     isLcmRunning = False
@@ -332,7 +359,7 @@ def permission_ownership_Check(IsVxRail):
     
     if checkPassed3 == False:
         logger.debug(f'File permission check failed for {files_to_check2}.')
-        print(f'\n  Please update permissions for the above file(s) using the command: "chmod 400 {CYELLOW}<filepath>{CEND}"\n  NOTE: 600 is the minimum required permission.\n')
+        print(f'\n  Please update permissions for the above file(s) using the command: "chmod 400 {CYELLOW}<filepath>{CEND}"\n  NOTE: 400 is the minimum required permission.\n')
     
     if checkPassed1 == True and checkPassed2 == True and checkPassed3 == True:
         logger.info('File permissions and ownership check passed.')
@@ -340,6 +367,124 @@ def permission_ownership_Check(IsVxRail):
         return 0
     else:
         return 1
+    
+def checkMigrationFeatureFlags():
+    filePath = '/home/vcf/feature.properties'
+    try:
+        with open(filePath, 'r') as f:
+            features = f.read()
+    except Exception as e:
+        logger.error(f'Cannot read file: {filePath}. Error: {e}')
+        return
+    
+    fail1 = False
+    fail2 = False
+    if "feature.lcm.store.target.version=false" in features:
+        fail1 = True
+    if "feature.vcf.isolated.wlds=false" in features:
+        fail2 = True
+    
+    if fail1 is True or fail2 is True:
+        print(f'\n{CBLUE}Checking Migration Feature Flags:{CEND}\n')
+        if fail1 is True:
+            print(f'  [ {CRED}\u2717{CEND} ] Found feature flag: feature.lcm.store.target.version=false')
+        if fail2 is True:
+            print(f'  [ {CRED}\u2717{CEND} ] Found feature flag: feature.vcf.isolated.wlds=false')
+        print(f'\n  Please delete the above line(s) from the file "/home/vcf/feature.properties" and restart all services.') 
+        
+
+def checkDepotSettings(token, IsVxRail):
+    
+    print(f'\n{CBLUE}Checking Depot Configuration::{CEND}\n')
+    
+    print(f' DEPOT CONFIGURATION:')
+    # Get current depot settings
+    api_url = f'http://localhost/v1/system/settings/depot'
+    headers = {'Accept': 'application/json', 'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(token)}
+    logger.info(f'Attempting GET API Call with URL {api_url}')
+    response = requests.request("GET", api_url, headers=headers, verify=False)
+    try:    
+        response.json()["vmwareAccount"]["status"] == "DEPOT_CONNECTION_SUCCESSFUL"
+        print(f'  [ {CGREEN}\u2713{CEND} ] VMware depot connected successfully with user: {response.json()["vmwareAccount"]["username"]}')
+        logger.info(f'VMware depot connected successfully with user: {response.json()["vmwareAccount"]["username"]}')
+    except Exception as e:
+        print(f"  [ {CRED}!{CEND} ] VMware depot is not connected")
+        logger.error(f'VMware depot not connected. Error: {e}')
+        
+    if IsVxRail:
+        try:    
+            response.json()["dellEmcSupportAccount"]["status"] == "DEPOT_CONNECTION_SUCCESSFUL"
+            print(f'  [ {CGREEN}\u2713{CEND} ] Dell depot connected successfully with user: {response.json()["dellEmcSupportAccount"]["username"]}')
+            logger.info(f'VMware depot connected successfully with user: {response.json()["dellEmcSupportAccount"]["username"]}')
+        except Exception as e:
+            print(f"  [ {CRED}!{CEND} ] Dell depot is not connected")
+            logger.error(f'VMware depot not connected. Error: {e}')
+
+    depotConnectityTest(IsVxRail)
+    proxyStatus(token)
+
+def depotConnectityTest(IsVxRail):
+    vmwareDepotUri = 'depot.vmware.com'
+    dellDepotUri = 'colu.emc.com'
+    port = 443
+    timeout = 2
+    print(f'\n CONNECTIVITY TEST:')
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((vmwareDepotUri, port))
+        print(f'  [ {CGREEN}\u2713{CEND} ] Connectivity to VMware Depot is allowed')
+        logger.info('Connectivity to VMware Depot allowed')
+        IsVmwareAccess = True
+    except socket.error as ex:
+        print(f'  [ {CRED}!{CEND} ] Unable to connect to VMware Depot')
+        logger.error('Unable to connect to VMware Depot')
+        IsVmwareAccess = False
+        
+    if IsVxRail:
+        try:
+            socket.setdefaulttimeout(timeout)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((dellDepotUri, port))
+            print(f'  [ {CGREEN}\u2713{CEND} ] Connectivity to Dell Depot is allowed')
+            logger.info('Connectivity to Dell Depot allowed')
+            IsDellAccess = True
+        except socket.error as ex:
+            print(f'  [ {CRED}!{CEND} ] Unable to connect to Dell Depot')
+            logger.error('Unable to connect to Dell Depot')
+            IsDellAccess = False
+    
+    print('')
+    if IsVxRail:
+        if (IsDellAccess == False) and (IsVmwareAccess == False):
+            print(f'  [ {CRED}!{CEND} ] Environment Type may be {CRED}OFFLINE{CEND}')
+        else:
+            print(f'  [ {CGREEN}\u2713{CEND} ] Environment Type is ONLINE')
+    else:
+        if (IsVmwareAccess == False):
+            print(f'  [ {CRED}!{CEND} ] Environment Type may be {CRED}OFFLINE{CEND}')
+        else:
+            print(f'  [ {CGREEN}\u2713{CEND} ] Environment Type is ONLINE')
+
+def proxyStatus(token):
+    print(f'\n PROXY:')
+    api_url = f'http://localhost/v1/system/proxy-configuration'
+    headers = {'Accept': 'application/json', 'Content-Type': 'application/json', 'Authorization': 'Bearer {}'.format(token)}
+    logger.info(f'Attempting GET API Call with URL {api_url}')
+    response = requests.request("GET", api_url, headers=headers, verify=False)
+    try:
+        if response.json()["isConfigured"] == False:
+            print(f'  [ {CGREEN}\u2713{CEND} ] No Proxy configured for LCM service in SDDC Manager')
+            logger.info('Proxy not configured for LCM.')
+        else:
+            print(f'  [ {CRED}!{CEND} ] Proxy configured for LCM service in SDDC Manager. Host: {response.json()["host"]}')
+            logger.info('Proxy configured for LCM.')
+            if response.json()["isEnabled"] == False:
+                print(f'  [ {CRED}!{CEND} ] Proxy is NOT enabled')
+                logger.info('Proxy is NOT enabled.')
+            else:
+                print(f'  [ {CRED}!{CEND} ] Proxy is enabled')
+                logger.info('Proxy is enabled.')
+    except Exception as e:
+        logger.error('proxy-configuration API failed to run.')            
 
 def asyncPatching_Check():
     # Check if Async Patching is currently enabled in the environment
@@ -356,6 +501,8 @@ def asyncPatching_Check():
             if config in fileContents:
                 logger.debug(f'Config:{config} found in file: {file}')
                 return True
+            else:
+                logger.debug(f'Config:{config} not found in file: {file}')
         except Exception as e:
             logger.error(f'Failed to open file. Error: {e}')
     
@@ -373,14 +520,30 @@ def asyncPatching_Check():
         asyncConfig = True
 
     if asyncConfig == True:
-        print(f'  [ {CRED}\u2717{CEND} ] Async Patching configuration detected.')
+        print(f'  [ {CRED}\u2717{CEND} ] Async Patching configuration detected ')
         print('\tPlease disable Async Patching using the command: ')
         print(f'\t{CBLUE}/home/vcf/asyncPatchTool/bin/vcf-async-patch-tool --disableAllPatches --sddcSSOUser administrator@vsphere.local --sddcSSHUser vcf{CEND}\n')
         return 1
     else:
-        print(f'  [ {CGREEN}\u2713{CEND} ] Async Patching configuration not detected.')
+        print(f'  [ {CGREEN}\u2713{CEND} ] Async Patching configuration not detected')
         return 0
          
+def getManifestPolling():
+    print(f'\n{CBLUE}Checking LCM Manifest Polling status:{CEND}\n')
+    try:
+        with open('/opt/vmware/vcf/lcm/lcm-app/conf/application-prod.properties') as f:
+            lines = f.readlines()
+            for row in lines:
+                if 'lcm.core.enableManifestPolling' in row:
+                    if 'true' in row:
+                        logger.debug('LCM Manifest Polling is Enabled')
+                        print(f'  [ {CGREEN}\u2713{CEND} ] LCM Manifest Polling is Enabled')
+                    else:
+                        logger.debug('LCM Manifest Polling is NOT Enabled')
+                        print(f'  [ {CRED}\u2717{CEND} ] LCM Manifest Polling is NOT Enabled')
+    except Exception as e:
+        logger.error(f'Failed to run manifest polling check. Error: {e}')
+        
 def getSDDCVersion():
     # Current SDDC Manager version:
     api_url = f'http://localhost/inventory/sddcmanagercontrollers'
@@ -474,7 +637,7 @@ def hostStatusCheck(host):
     
     return notActiveHosts, isActive
         
-def bundleAvailabilityLogic(requiredBundles,vcenter,nsxt,host,sddcVersion,token,IsVxRail):
+def bundleAvailabilityLogic(requiredBundles,manifestTargetVersion,vcenter,nsxt,host,sddcVersion,token,IsVxRail):
     # Get current version of NSX-T, VC and ESXi for chosen domain
 
     # Version is the 2nd value
@@ -507,9 +670,9 @@ def bundleAvailabilityLogic(requiredBundles,vcenter,nsxt,host,sddcVersion,token,
     # Perform Version Alias Configuration check
     logger.info(f'Performing Version Alias Checks.')
     print(f"\n{CBLUE}Version Alias Detection:{CEND} ")
-    aliasChecker("NSX_T_MANAGER", nsxt[version], requiredBundles['nsx'], sddcVersion, token)
-    aliasChecker("VCENTER", vcenter[version], requiredBundles['vc'], sddcVersion, token)
-    aliasChecker("ESX_HOST", host[0][version], requiredBundles['esx'], sddcVersion, token)
+    aliasChecker("NSX_T_MANAGER", manifestTargetVersion["nsx"], nsxt[version], requiredBundles['nsx'], sddcVersion, token)
+    aliasChecker("VCENTER", manifestTargetVersion["vc"], vcenter[version], requiredBundles['vc'], sddcVersion, token)
+    aliasChecker("ESX_HOST", manifestTargetVersion["esx"], host[0][version], requiredBundles['esx'], sddcVersion, token)
     
     # Skip compatibility set check if VCF = 5.x due to new VVS data:
     if sddcVersion.startswith('4.'):    
@@ -565,7 +728,7 @@ def compatSetChecker(requiredBundles):
                     "nsxT":{"version":requiredBundles['nsx']['toVersion']},
                     'compatibilitySetVersion': 2}
     requiredSet3 = {"vc":{"version":requiredBundles["vc"]['toVersion']},
-                    "esxi":{"version":requiredBundles['esx']['toVersion]']},
+                    "esxi":{"version":requiredBundles['esx']['toVersion']},
                     "nsxT":{"version":requiredBundles['nsx']['toVersion']},
                     'compatibilitySetVersion': 2}
     requiredCompatSets = [requiredSet1, requiredSet2, requiredSet3]
@@ -589,34 +752,42 @@ def statusChecker(component, status):
     else:
         print(f"  [ {CRED}\u2717{CEND} ] {component} \t: {CRED}{status}{CEND} -> Please investigate the status of the component and mark as ACTIVE from the database if required.")
     
-def aliasChecker(component, dbVersion, requiredVersions, sddcVersion, token):
+def aliasChecker(component, manifestTargetVersion, dbVersion, requiredVersions, sddcVersion, token):
     
     AliasCheck = False
     aliasFound = 0
     print(f"\n {component}:")
-    try:
-        targetVersion = requiredVersions['toVersion']
-        baseVersion = requiredVersions['fromVersion']
-    except:
-        logger.error(f'Alias Check failed for component {component}. No upgrade bundle found for product {component} in VCF BoM {sddcVersion}')
-        print(f"\n  [ {CRED}\u2717{CEND} ] {CRED}Alias checking failed. Upgrade Bundle not found for product {component}{CEND}.")
-        return None
     
     logger.debug(f'Component: {component}')
     logger.debug(f'Current Version from DB: {dbVersion}')
-    logger.debug(f'Manifest Current Version: {targetVersion}')
-    logger.debug(f'Manifest Required Previous Version: {baseVersion}')
+    logger.debug(f'Manifest Target Version: {manifestTargetVersion}')
     logger.debug(f'SDDC Manager Version: {sddcVersion}')
     
-    if dbVersion == targetVersion:
+    # Getting specific build numbers
+    dbVersion_build = int(dbVersion.split("-")[1])
+    manifestTargetVersion_build = int(manifestTargetVersion.split("-")[1])
+    
+    if dbVersion == manifestTargetVersion:
         # Check if the versions match current SDDC Version BOM
-        logger.debug(f'Current Version from DB: {dbVersion} MATCHES Manifest Current Version: {targetVersion}. Component is already on target version. No aliasing required.')
+        logger.debug(f'Current Version from DB: {dbVersion} MATCHES Manifest Target Version: {manifestTargetVersion}. Component is already on target version. No aliasing required.')
         print(f"\n  [ {CGREEN}\u2713{CEND} ] {component} {dbVersion} is already on VCF {sddcVersion} BoM. No aliasing required.")
-    elif dbVersion == baseVersion:
-        # Check if the versions match the required previous version, in which case no aliasing is required.
-        logger.debug(f'Current Version from DB: {dbVersion} MATCHES Manifest Required Previous Version: {baseVersion}. Component is already at requiredPreviousVersion version. No aliasing required.')
-        print(f"\n  [ {CGREEN}\u2713{CEND} ] {component} {dbVersion} is already at the requiredPreviousVersion for upgrading to VCF {sddcVersion} BoM. No aliasing required.")
     else:
+        try:
+            if dbVersion_build > manifestTargetVersion_build:
+                targetVersion = 'N/A'
+                baseVersion = requiredVersions['toVersion'] 
+                print(f"  [ {CYELLOW}!{CEND} ] {component} version {dbVersion} is a higher build than VCF {sddcVersion} BoM {component} version {baseVersion}.")
+            else:    
+                targetVersion = requiredVersions['toVersion']
+                baseVersion = requiredVersions['fromVersion']
+        except:
+            logger.error(f'Alias Check failed for component {component}. No upgrade bundle found for product {component} in VCF BoM {sddcVersion}')
+            print(f"\n  [ {CRED}\u2717{CEND} ] {CRED}Alias checking failed. Upgrade Bundle not found for product {component}{CEND}.")
+            return None
+            
+        logger.debug(f'Target Version from Required Bundle: {targetVersion}')
+        logger.debug(f'Manifest Required Previous Version: {baseVersion}')
+        
         # Get Version Aliasing for component
         vaEntries = loadVersionAlias(component,token)
         if vaEntries == "error":
@@ -624,7 +795,7 @@ def aliasChecker(component, dbVersion, requiredVersions, sddcVersion, token):
             sys.exit(1)
         elif vaEntries == "None" or vaEntries == None:
             print(f"\n  [ {CRED}\u2717{CEND} ] {CRED}No entry found for {component} in VersionAlias.yml file.{CEND}")
-            print(f"  Please add an entry for {component} with alias version {dbVersion} and base version {baseVersion} for allowing upgrade to VCF {sddcVersion} BoM.")
+            print(f"  Please add an entry for {component} with alias version {dbVersion} and base version {baseVersion}.")
         else:
             try:
                 for entry in vaEntries:
@@ -636,19 +807,19 @@ def aliasChecker(component, dbVersion, requiredVersions, sddcVersion, token):
                                 logger.debug(f'Base Entry: {entry["version"]} MATCHES Manifest Required Previous Version: {baseVersion}. AliasCheck marked as True.')
                                 AliasCheck = True
                             break
-                if AliasCheck == True:
+                if AliasCheck is True:
                     logger.debug(f'Correct Aliasing Found | Component version {dbVersion} MATCHES Manifest Required Previous Version: {baseVersion}.')
-                    print(f"\n  [ {CGREEN}\u2713{CEND} ] {CGREEN}CORRECT ALIAS FOUND{CEND}: Current Version of {component} {dbVersion} is aliased to base version {baseVersion} for allowing upgrade to VCF {sddcVersion} BoM.")
+                    print(f"\n  [ {CGREEN}\u2713{CEND} ] {CGREEN}CORRECT ALIAS FOUND{CEND}: Current Version of {component} {dbVersion} is aliased to base version {baseVersion}.")
                 elif aliasFound > 0:
                     logger.debug(f'Alias Found, required baseVersion not found. | Base Entry DOES NOT MATCH Manifest Required Previous Version: {baseVersion}. Need to update aliasing to correct base version: {baseVersion}.')
-                    print(f"\n  [ {CRED}\u2717{CEND} ] {CRED}INCORRECT BASE VERSION{CEND}: Current Version of {component} {dbVersion} is aliased to an INCORRECT base version.\n  Please edit the base version to {baseVersion} for allowing upgrade to VCF {sddcVersion} BoM.")
+                    print(f"\n  [ {CRED}\u2717{CEND} ] {CRED}INCORRECT BASE VERSION{CEND}: Current Version of {component} {dbVersion} is aliased to an INCORRECT base version.\n  Please edit the base version to {baseVersion}.")
                 else:
                     logger.debug(f'No Alias Entry found. | Need to ADD an alias entry for {dbVersion} to correct base version: {baseVersion}.')
-                    print(f"\n  [ {CRED}\u2717{CEND} ] {CRED}NO ALIAS FOUND{CEND} for Current Version of {component} {dbVersion}.\n  Please add an alias for version {dbVersion} with base version as {baseVersion} for allowing upgrade to VCF {sddcVersion} BoM.")
+                    print(f"\n  [ {CRED}\u2717{CEND} ] {CRED}NO ALIAS FOUND{CEND} for Current Version of {component} {dbVersion}.\n  Please add an alias for version {dbVersion} with base version as {baseVersion}.")
                 
                 if aliasFound > 1:
                     logger.debug(f'Multiple base versions detected for alias entry: {dbVersion}. Need to update aliasing to only correct base version: {baseVersion}.')
-                    print(f"\n  [ {CRED}!!{CEND} ] Current Version of {component} {dbVersion} is being aliased to multiple base version.\n  Please only alias it to base version {baseVersion} for allowing upgrade to VCF {sddcVersion}BoM.")
+                    print(f"\n  [ {CRED}!!{CEND} ] Current Version of {component} {dbVersion} is being aliased to multiple base versions.\n  Please only alias it to base version {baseVersion}.")
             except Exception as e:
                 logger.error(f'Fatal Exception: {e}')
                 print(f'Unknown Exception. Please review logs at /var/log/vmware/vcf/upgradeHelper.log for additional details.')
@@ -884,6 +1055,15 @@ def main(username, password):
     logger.info('Checking status of Async Patching')
     ap_error = asyncPatching_Check()
     
+    logger.info('Checking status of depot connection and configuration')
+    checkDepotSettings(token, IsVxRail)
+    
+    logger.info('Checking status of lcm manifest polling')
+    getManifestPolling()
+    
+    logger.info('Checking migration feature flags')    
+    checkMigrationFeatureFlags()
+    
     if (perm_error == 1) or (service_error == 1) or (ap_error == 1):
         print(f"\n{CRED}-- Please resolve the errors above and re-try --{CEND}\n")
         logger.error(f'One or more checks failed. Exiting ...')
@@ -899,13 +1079,13 @@ def main(username, password):
     manifest = loadManifest(token)
     
     logger.info('Getting Target Versions of BoM Components')
-    targetVersion = getTargetVersions(manifest, sddcVersion)
+    manifestTargetVersion = getTargetVersions(manifest, sddcVersion)
     
     logger.info('Checking Status of Required Upgrade Bundles and getting previous required versions')
-    requiredBundles = getRequiredBundles(targetVersion, token) 
+    requiredBundles = getRequiredBundles(manifestTargetVersion, token) 
     
     logger.info('Starting bundle availability logic')
-    bundleAvailabilityLogic(requiredBundles,vcenter,nsxt,host,sddcVersion,token,IsVxRail)
+    bundleAvailabilityLogic(requiredBundles,manifestTargetVersion,vcenter,nsxt,host,sddcVersion,token,IsVxRail)
     print()
     logger.info('Execution Complete. Exiting upgradeHelper ...')
 
